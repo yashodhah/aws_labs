@@ -11,8 +11,5 @@ module "vpc_1" {
   azs_database = local.azs.main.database
   azs_public   = local.azs.main.public
 
-  vpc_enable_nat_gateway = true
-  vpc_single_nat_gateway = true
-
   tags = local.tags
 }

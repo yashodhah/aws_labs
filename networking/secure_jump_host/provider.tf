@@ -17,12 +17,11 @@ provider "aws" {
   region = var.aws_region_main
 }
 
-#terraform {
-#  backend "s3" {
-#    encrypt = true
-#    bucket  = "dev.yashodha.space.tf.state"
-#    key     = "dev/ssh-lab.tfstate"
-#    region  = "ap-south-1"
-#    #    dynamodb_table = "st-terraform-state-lock-dev"
-#  }
-#}
+terraform {
+  backend "s3" {
+    encrypt = true
+    bucket  = "dev.yashodha.space.tf.state"
+    key     = "dev/landing_arch"
+    region  = "ap-south-1"
+  }
+}

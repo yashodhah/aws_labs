@@ -38,9 +38,9 @@ module "vpc" {
   create_database_nat_gateway_route = terraform.workspace != "default"
 
   # NATs configuration
-#  enable_nat_gateway     = var.vpc_enable_nat_gateway
+  enable_nat_gateway     = var.vpc_enable_nat_gateway
 #  one_nat_gateway_per_az = var.vpc_one_nat_gateway_per_az
-#  single_nat_gateway     = var.vpc_single_nat_gateway
+  single_nat_gateway     = var.vpc_single_nat_gateway
 #  reuse_nat_ips          = var.reuse_nat_ips    # Skip creation of EIPs for the NAT Gateways
 #  external_nat_ips       = var.external_nat_ips # This is required for `nat_public_ips` output to work.
 #  external_nat_ip_ids    = [for _, eip in data.aws_eip.external_nat_ips : eip.id]

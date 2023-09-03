@@ -32,3 +32,11 @@ variable "public_subnets" {
 variable "database_subnets" {
   default = null
 }
+
+variable "vpc_single_nat_gateway" {
+  default = false
+}
+
+variable "vpc_enable_nat_gateway" {
+  default = false
+}
