@@ -7,7 +7,14 @@ module "ec2_bastion" {
   instance_type               = "t2.micro"
   subnet_id                   = element(module.vpc_1.private_subnets, 0)
   vpc_security_group_ids      = [module.ec2_bastion_sec_group.security_group_id]
-  associate_public_ip_address = true
+  associate_public_ip_address = false
+
+
+  create_iam_instance_profile = true
+  iam_role_description        = "IAM role for EC2 instance"
+  iam_role_policies = {
+    AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  }
 
   maintenance_options = {
     auto_recovery = "default"
@@ -25,7 +32,13 @@ module "ec2_db" {
   instance_type               = "t2.micro"
   subnet_id                   = element(module.vpc_1.database_subnets, 0)
   vpc_security_group_ids      = [module.ec2_db_sec_group.security_group_id]
-  associate_public_ip_address = true
+  associate_public_ip_address = false
+
+  create_iam_instance_profile = true
+  iam_role_description        = "IAM role for EC2 instance"
+  iam_role_policies = {
+    AmazonSSMManagedInstanceCore = "arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore"
+  }
 
   maintenance_options = {
     auto_recovery = "default"
