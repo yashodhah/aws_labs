@@ -1,0 +1,5 @@
+aws_region   = "us-east-1"
+environment  = "dev"
+project_name = "cloudfront-playground"
+bucket_name  = "cloudfront-playground-bucket"
+api_name     = "cloudfront-playground-api"

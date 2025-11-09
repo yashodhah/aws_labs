@@ -1,0 +1,683 @@
+Description: AWS WAF workshop environment uksb-1tupboc65 # Do not remove workshop tracking ID!
+
+Parameters:
+  AssetsBucketName:
+    Type: String
+    Description: Name of S3 bucket that contains custom resources and assets
+  AssetsBucketPrefix:
+    Type: String
+    Description: S3 prefix for custom resources and assets - leave empty if deploying in your own account
+
+Resources:
+  # IAM Execution Role for all Lambdas in the workshop
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Action: sts:AssumeRole
+            Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole
+        - arn:aws:iam::aws:policy/AmazonS3FullAccess
+
+  # Simple endpoint that sends HTTP 200 OKs
+  BackendAPILambdaFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: BackendAPI
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: nodejs18.x
+      Code:
+        ZipFile: "exports.handler = async event => `Hello world at ${(new Date()).toUTCString()}! You have requested: ${event.rawPath}`"
+
+  # Simple endpoint Lambda Function URL
+  BackendAPILambdaFunctionURL:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: NONE
+      TargetFunctionArn: !GetAtt BackendAPILambdaFunction.Arn
+
+  # Allow Simple endpoint Lambda to be invoked from our CF distribution
+  BackendAPILambdaPermissionPolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      Principal: cloudfront.amazonaws.com
+      FunctionName: !Ref BackendAPILambdaFunction
+      SourceArn: !Sub "arn:aws:cloudfront::${AWS::AccountId}:distribution/${ProtectedResourcesDistribution}"
+  
+  # We do asset copy from Workshop Asset Bucket to clone these at event creation and not depend on Workshop Studio static asset URLs
+  S3AssetCopyFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: S3AssetCopy
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      MemorySize: 4096
+      Runtime: python3.12
+      Timeout: 30
+      Code:
+        ZipFile: |
+          import boto3
+          import cfnresponse
+          def handler(event, context):
+            try:          
+              rp = event['ResourceProperties']
+              boto3.resource('s3').Object(rp['DESTINATION_BUCKET'], rp['DESTINATION_KEY']).copy_from(CopySource=rp['SOURCE_BUCKET'] + '/' + rp['SOURCE_KEY'])
+              cfnresponse.send(event, context, cfnresponse.SUCCESS, {})
+            except Exception as e:
+              cfnresponse.send(event, context, cfnresponse.FAILED, {})
+
+  UploadHTMLSampleStaticWebsite:
+    Type: Custom::S3AssetCopyFunction
+    Properties:
+      ServiceToken: !GetAtt S3AssetCopyFunction.Arn
+      SOURCE_BUCKET: !Ref AssetsBucketName
+      SOURCE_KEY: !Sub ${AssetsBucketPrefix}sample-static-website.html
+      DESTINATION_BUCKET: !Ref ParticipantAssetsBucket
+      DESTINATION_KEY: sample-static-website.html
+
+  UploadHTMLScanningDashboard:
+    Type: Custom::S3AssetCopyFunction
+    Properties:
+      ServiceToken: !GetAtt S3AssetCopyFunction.Arn
+      SOURCE_BUCKET: !Ref AssetsBucketName
+      SOURCE_KEY: !Sub ${AssetsBucketPrefix}scanning-dashboard.html
+      DESTINATION_BUCKET: !Ref ParticipantAssetsBucket
+      DESTINATION_KEY: scanning-dashboard.html
+
+  #Deploys an ALB as the default origin of the sample app CloudFront
+
+  # Security Group
+  SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Allows CloudFront Only access
+      SecurityGroupIngress:
+      - SourcePrefixListId: pl-3b927c52
+        FromPort: 80
+        ToPort: 80
+        IpProtocol: tcp
+      VpcId: !GetAtt VPC.VpcId
+
+  # VPC
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsHostnames: true
+      EnableDnsSupport: true
+      InstanceTenancy: default
+      Tags:
+        - Key: Name
+          Value: Main VPC
+
+  # Load Balancer
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups: 
+        - !Ref SecurityGroup
+      Subnets: 
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      Type: application
+
+  # Load Balancer Listener
+  LoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      DefaultActions:
+        - Type: fixed-response
+          Order: 1
+          FixedResponseConfig:
+            StatusCode: '200'
+            ContentType: text/plain  
+            MessageBody: Hello World!
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+
+  # Public Subnet 1
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [0, !GetAZs '']
+      CidrBlock: 10.0.1.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+
+  # Public Subnet 2  
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      AvailabilityZone: !Select [1, !GetAZs '']  
+      CidrBlock: 10.0.2.0/24
+      MapPublicIpOnLaunch: true
+      VpcId: !Ref VPC
+
+  # Internet Gateway
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  # VPC Gateway Attachment 
+  VPCGatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # Route Table
+  RouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  # Route
+  Route:
+    Type: AWS::EC2::Route
+    DependsOn: VPCGatewayAttachment
+    Properties:
+      RouteTableId: !Ref RouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  # Subnet Route Table Association 1
+  SubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref RouteTable
+
+  # Subnet Route Table Association 2  
+  SubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref RouteTable
+
+  # CloudFront distribution to serve protected resources
+  ProtectedResourcesDistribution:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        CacheBehaviors:
+          - TargetOriginId: ParticipantAssetsBucket
+            PathPattern: /
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # managed CachingOptimized
+            ViewerProtocolPolicy: allow-all
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt SampleWebsiteRewrites.FunctionARN
+          - TargetOriginId: ParticipantAssetsBucket
+            PathPattern: /quiz
+            CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # managed CachingOptimized
+            ViewerProtocolPolicy: allow-all
+            FunctionAssociations:
+              - EventType: viewer-request
+                FunctionARN: !GetAtt SampleWebsiteRewrites.FunctionARN
+        DefaultCacheBehavior:
+          TargetOriginId: ALBOrigin
+          CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # managed CachingDisabled
+          ViewerProtocolPolicy: allow-all # pure HTTP needs to be allowed to prevent CloudFront from sending 200 OK on blocked requests
+          AllowedMethods:
+            - GET
+            - HEAD
+            - OPTIONS
+            - PUT
+            - POST
+            - PATCH
+            - DELETE
+        Comment: Sample Web Application
+        Enabled: true
+        HttpVersion: http2and3
+        Origins:
+          - Id: ParticipantAssetsBucket
+            DomainName: !GetAtt ParticipantAssetsBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
+          - Id: ALBOrigin
+            DomainName: !GetAtt LoadBalancer.DNSName
+            CustomOriginConfig:
+              OriginProtocolPolicy: http-only
+          - Id: LambdaOrigin
+            DomainName: !Select
+              - 2
+              - !Split
+                - "/"
+                - !GetAtt BackendAPILambdaFunctionURL.FunctionUrl
+            OriginAccessControlId: !Ref CloudFrontLambdaOAC
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+
+  # Rewrite paths of the simple website
+  SampleWebsiteRewrites:
+    Type: AWS::CloudFront::Function
+    Properties: #
+      Name: waf-workshop-sample-website-rewrites
+      AutoPublish: true
+      FunctionCode: function handler(event) { event.request.uri = '/sample-static-website.html'; return event.request; }
+      FunctionConfig:
+        Comment: CloudFront Function for URI rewrites
+        Runtime: cloudfront-js-1.0
+
+  CloudFrontLambdaOAC:
+    Type: AWS::CloudFront::OriginAccessControl
+    Properties:
+      OriginAccessControlConfig:
+        Name: CloudFrontLambdaOAC
+        OriginAccessControlOriginType: lambda
+        SigningBehavior: always
+        SigningProtocol: sigv4
+
+  # CloudFront OAI
+  CloudFrontOriginAccessIdentity:
+    Type: AWS::CloudFront::CloudFrontOriginAccessIdentity
+    Properties:
+      CloudFrontOriginAccessIdentityConfig:
+        Comment: Workshop Dashboard OAI
+
+  # Participant Assets Bucket - for static HTML files (sample application, scanning dashboard) and scanning results
+  ParticipantAssetsBucket:
+    Type: AWS::S3::Bucket
+    # DeletionPolicy: Delete # do not use Delete as it breaks CloudFormation if Bucket contains objects
+    # Do not use BucketName property to avoid collisions
+
+  ParticipantAssetsBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref ParticipantAssetsBucket
+      PolicyDocument:
+        # Restrict access to CloudFront only
+        Statement:
+          - Effect: Allow
+            Action: s3:GetObject
+            Resource: !Sub arn:${AWS::Partition}:s3:::${ParticipantAssetsBucket}/*
+            Principal:
+              AWS: !Sub arn:${AWS::Partition}:iam::cloudfront:user/CloudFront Origin Access Identity ${CloudFrontOriginAccessIdentity}
+
+
+  # CloudFront Distriution to merge together delivery of the Workshop Dashboard UI and WAF scanning results
+  WafWorkshopDashboardAndUtilities:
+    Type: AWS::CloudFront::Distribution
+    Properties:
+      DistributionConfig:
+        CacheBehaviors:
+          - TargetOriginId: ParticipantAssetsBucket
+            PathPattern: /scanning-results.json
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # managed CachingDisabled
+            ViewerProtocolPolicy: allow-all
+          - TargetOriginId: ManualScannerLambdaFunction
+            PathPattern: /test-protections
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # managed CachingDisabled
+            ViewerProtocolPolicy: allow-all
+          - TargetOriginId: RateLimitTriggerLambdaFunction
+            PathPattern: /trigger-rate-limiting
+            CachePolicyId: 4135ea2d-6df8-44a3-9df3-4b5a84be39ad # managed CachingDisabled
+            ViewerProtocolPolicy: allow-all
+        DefaultCacheBehavior:
+          TargetOriginId: ParticipantAssetsBucket
+          CachePolicyId: 658327ea-f89d-4fab-a63d-7e88639e58f6 # managed CachingOptimized
+          ViewerProtocolPolicy: allow-all
+        Comment: AWS WAF Workshop Dashboard and Utilities
+        DefaultRootObject: scanning-dashboard.html
+        Enabled: true
+        HttpVersion: http2and3
+        Origins:
+          - Id: ParticipantAssetsBucket
+            DomainName: !GetAtt ParticipantAssetsBucket.RegionalDomainName
+            S3OriginConfig:
+              OriginAccessIdentity: !Sub origin-access-identity/cloudfront/${CloudFrontOriginAccessIdentity}
+          - Id: ManualScannerLambdaFunction
+            DomainName: !Select
+              - 2
+              - !Split
+                - "/"
+                - !GetAtt ManualScannerLambdaFunctionURL.FunctionUrl
+            OriginAccessControlId: !GetAtt CloudFrontLambdaOAC.Id
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+          - Id: RateLimitTriggerLambdaFunction
+            DomainName: !Select
+              - 2
+              - !Split
+                - "/"
+                - !GetAtt RateLimitTriggerLambdaFunctionURL.FunctionUrl
+            OriginAccessControlId: !GetAtt CloudFrontLambdaOAC.Id
+            CustomOriginConfig:
+              OriginProtocolPolicy: https-only
+
+  # Automated Scanner Lambda Function
+  AutomatedScannerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref AssetsBucketName
+        S3Key: !Sub ${AssetsBucketPrefix}automated-scanner.zip
+      FunctionName: AutomatedScanner
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: nodejs18.x
+      Timeout: 60
+      Environment:
+        Variables:
+          PROTECTED_RESOURCE_URL: !GetAtt ProtectedResourcesDistribution.DomainName
+          RESULTS_BUCKET_NAME: !Ref ParticipantAssetsBucket
+
+  AutomatedScannerSchedule:
+    Type: AWS::Events::Rule
+    Properties:
+      Description: AutomatedScanning
+      ScheduleExpression: rate(1 minute)
+      State: ENABLED
+      Targets:
+        - Arn: !GetAtt AutomatedScannerFunction.Arn
+          Id: TargetFunctionV1
+
+  AutomatedScannerPermissionToInvoke:
+    Type: AWS::Lambda::Permission
+    Properties:
+      FunctionName: !Ref AutomatedScannerFunction
+      Action: lambda:InvokeFunction
+      Principal: events.amazonaws.com
+      SourceArn: !GetAtt AutomatedScannerSchedule.Arn
+
+  # Manual Scanner Lambda Function
+  ManualScannerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref AssetsBucketName
+        S3Key: !Sub ${AssetsBucketPrefix}manual-scanner.zip
+      FunctionName: ManualScanner
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          PROTECTED_RESOURCE_URL: !GetAtt ProtectedResourcesDistribution.DomainName
+
+  # Lambda function URL for manual scanner function
+  ManualScannerLambdaFunctionURL:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: AWS_IAM
+      TargetFunctionArn: !GetAtt ManualScannerFunction.Arn
+
+  # Allow Manual Scanner Lambda to be invoked from CloudFront via OAC
+  ManualScannerLambdaOACPermissionPolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref ManualScannerFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${WafWorkshopDashboardAndUtilities}
+
+  # Rate Limit Trigger Lambda Function
+  RateLimitTriggerFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      Code:
+        S3Bucket: !Ref AssetsBucketName
+        S3Key: !Sub ${AssetsBucketPrefix}rate-limit-trigger.zip
+      FunctionName: RateLimitTrigger
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.12
+      Timeout: 60
+      Environment:
+        Variables:
+          TARGET_DOMAIN_NAME: !GetAtt ProtectedResourcesDistribution.DomainName
+
+  # Lambda Function URL for RateLimitTrigger
+  RateLimitTriggerLambdaFunctionURL:
+    Type: AWS::Lambda::Url
+    Properties:
+      AuthType: AWS_IAM
+      TargetFunctionArn: !GetAtt RateLimitTriggerFunction.Arn
+
+  # Allow RateLimitTrigger Lambda to be invoked from CloudFront via OAC
+  RateLimitTriggerLambdaPermissionPolicy:
+    Type: AWS::Lambda::Permission
+    Properties:
+      Action: lambda:InvokeFunctionUrl
+      FunctionName: !Ref RateLimitTriggerFunction
+      Principal: cloudfront.amazonaws.com
+      SourceArn: !Sub arn:${AWS::Partition}:cloudfront::${AWS::AccountId}:distribution/${WafWorkshopDashboardAndUtilities}
+
+  # AWS WAF Logs
+  WAFLogsBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub aws-waf-logs-${AWS::AccountId}-${AWS::Region}
+    # DeletionPolicy: Delete # do not use Delete as it breaks CloudFormation if Bucket contains objects
+
+  WAFLogsFirehose:
+    Type: AWS::KinesisFirehose::DeliveryStream
+    Properties:
+      DeliveryStreamName: aws-waf-logs-workshop
+      ExtendedS3DestinationConfiguration:
+        RoleARN: !GetAtt WAFLogsDeliveryRole.Arn
+        BucketARN: !GetAtt WAFLogsBucket.Arn
+        BufferingHints:
+          IntervalInSeconds: 60
+          SizeInMBs: 1
+        CompressionFormat: UNCOMPRESSED
+
+  WAFLogsDeliveryRole:
+    Type: AWS::IAM::Role
+    Properties:
+      Policies:
+        - PolicyName: waf-logs-firehose-delivery-policy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:AbortMultipartUpload
+                  - s3:GetBucketLocation
+                  - s3:GetObject
+                  - s3:ListBucket
+                  - s3:ListBucketMultipartUploads
+                  - s3:PutObject
+                Resource:
+                  - !GetAtt WAFLogsBucket.Arn
+                  - !Sub ${WAFLogsBucket.Arn}/*
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Action: sts:AssumeRole
+            Principal:
+              Service: firehose.amazonaws.com
+
+  # Amazon Athena tables and queries
+  GlueAccessLogsDatabase:
+    Type: AWS::Glue::Database
+    Properties:
+      DatabaseInput:
+        Description: Strengthen your web application with AWS WAF Workshop - Access Logs
+      CatalogId: !Ref AWS::AccountId
+
+  GlueWafAccessLogsTable:
+    Type: AWS::Glue::Table
+    Properties:
+      DatabaseName: !Ref GlueAccessLogsDatabase
+      CatalogId: !Ref AWS::AccountId
+      TableInput:
+        TableType: EXTERNAL_TABLE
+        Name: waf_access_logs
+        Parameters:
+          {
+            "EXTERNAL": "TRUE",
+            "projection.enabled": "true",
+            "projection.day.type": "date",
+            "projection.day.range": "2024/01/01,NOW",
+            "projection.day.format": "yyyy/MM/dd",
+            "projection.day.interval": "1",
+            "projection.day.interval.unit": "DAYS",
+            "storage.location.template": !Sub "s3://${WAFLogsBucket}/${!day}",
+          }
+        PartitionKeys:
+          - Name: day
+            Type: string
+        StorageDescriptor:
+          Location: !Sub s3://${WAFLogsBucket}/
+          InputFormat: org.apache.hadoop.mapred.TextInputFormat
+          OutputFormat: org.apache.hadoop.hive.ql.io.HiveIgnoreKeyTextOutputFormat
+          SerdeInfo:
+            Parameters:
+              {
+                "paths": "action,formatVersion,httpRequest,httpSourceId,httpSourceName,nonTerminatingMatchingRules,rateBasedRuleList,ruleGroupList,terminatingRuleId,terminatingRuleType,timestamp,webaclId",
+              }
+            SerializationLibrary: org.openx.data.jsonserde.JsonSerDe
+          Compressed: true
+          StoredAsSubDirectories: false
+          Columns:
+            - Name: timestamp
+              Type: bigint
+            - Name: formatversion
+              Type: int
+            - Name: webaclid
+              Type: string
+            - Name: terminatingruleid
+              Type: string
+            - Name: terminatingruletype
+              Type: string
+            - Name: action
+              Type: string
+            - Name: httpsourcename
+              Type: string
+            - Name: httpsourceid
+              Type: string
+            - Name: rulegrouplist
+              Type: array<string>
+            - Name: ratebasedrulelist
+              Type: array<string>
+            - Name: nonterminatingmatchingrules
+              Type: array<string>
+            - Name: httprequest
+              Type: struct<clientip:string,country:string,headers:array<struct<name:string,value:string>>,uri:string,args:string,httpversion:string,httpmethod:string,requestid:string>
+
+  AthenaOutput:
+    Type: AWS::S3::Bucket
+
+  WAFLogAthenaQueryWorkGroup:
+    Type: AWS::Athena::WorkGroup
+    Properties:
+      Name: waf-workshop
+      State: ENABLED
+      RecursiveDeleteOption: true
+      WorkGroupConfiguration:
+        PublishCloudWatchMetricsEnabled: true
+        ResultConfiguration:
+          OutputLocation: !Sub s3://${AthenaOutput}/
+
+  AthenaQueryTop100IPs:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref GlueAccessLogsDatabase
+      Name: Top100IPs
+      Description: Top 100 IP addresses, ranked by their occurrence
+      QueryString:
+        "SELECT httprequest.clientip, count(*) ipcount, httprequest.country
+        FROM waf_access_logs
+        WHERE action = 'ALLOW'
+        GROUP BY httprequest.clientip, httprequest.country
+        ORDER BY ipcount DESC
+        LIMIT 100"
+      WorkGroup: !Ref WAFLogAthenaQueryWorkGroup
+
+  AthenaQueryUserAgents:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref GlueAccessLogsDatabase
+      Name: MostPopularUserAgents
+      Description: Most popular user agents, ranked by their occurrence
+      QueryString: "WITH DATASET AS
+        (SELECT header FROM waf_access_logs
+        CROSS JOIN UNNEST(httprequest.headers) AS t(header))
+        SELECT header.value,count(*) userAgentCount
+        FROM DATASET
+        WHERE LOWER(header.name)='user-agent'
+        GROUP BY header.value
+        ORDER BY userAgentCount DESC"
+      WorkGroup: !Ref WAFLogAthenaQueryWorkGroup
+
+  AthenaQueryHttpHeaders:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref GlueAccessLogsDatabase
+      Name: MostPopularHttpHeaders
+      Description: Most frequently used headers, ranked by their occurrence
+      QueryString: "WITH DATASET AS
+        (SELECT header FROM waf_access_logs
+        CROSS JOIN UNNEST(httprequest.headers) AS t(header))
+        SELECT header.name,count(*) headerNameCount
+        FROM DATASET
+        GROUP BY header.name
+        ORDER BY headerNameCount DESC"
+      WorkGroup: !Ref WAFLogAthenaQueryWorkGroup
+
+  AthenaQueryRequestsBlockedCount:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref GlueAccessLogsDatabase
+      Name: BlockedRequestsCount
+      Description: How many times requests were blocked, grouped by specific attributes
+      QueryString: "SELECT COUNT(*) AS
+        count,
+        webaclid,
+        terminatingruleid,
+        httprequest.clientip,
+        httprequest.uri
+        FROM waf_access_logs
+        WHERE action='BLOCK'
+        GROUP BY webaclid, terminatingruleid, httprequest.clientip, httprequest.uri
+        ORDER BY count DESC
+        LIMIT 100;"
+      WorkGroup: !Ref WAFLogAthenaQueryWorkGroup
+
+  AthenaQueryMysteryHintHeader:
+    Type: AWS::Athena::NamedQuery
+    Properties:
+      Database: !Ref GlueAccessLogsDatabase
+      Name: MysteryHintHeader
+      Description: "[SPOILER ALERT] Show encoded and decoded mystery-hint header values"
+      QueryString: "WITH DATASET AS
+        (SELECT header FROM waf_access_logs
+        CROSS JOIN UNNEST(httprequest.headers) AS t(header))
+        SELECT DISTINCT header.name header_name, header.value encoded_header_value
+        FROM DATASET
+        WHERE LOWER(header.name)='mystery-hint'"
+      WorkGroup: !Ref WAFLogAthenaQueryWorkGroup
+
+####################################
+
+Outputs:
+  1xWebApplicationURL:
+    Description: This application needs to be protected with AWS WAF
+    Value: !Sub https://${ProtectedResourcesDistribution.DomainName}
+
+  2xWAFConsole:
+    Description: Open AWS WAF console
+    Value: https://console.aws.amazon.com/wafv2/homev2/web-acls?region=global
+
+  3xProgressDashboard:
+    Description: See your workshop progress
+    Value: !Sub https://${WafWorkshopDashboardAndUtilities.DomainName}
+
+  4xTestProtections:
+    Description: Manually test enabled protections
+    Value: !Sub https://${WafWorkshopDashboardAndUtilities.DomainName}/test-protections
+
+  5xTriggerRateLimiting:
+    Description: Simulate traffic to trigger AWS WAF rate limiting
+    Value: !Sub https://${WafWorkshopDashboardAndUtilities.DomainName}/trigger-rate-limiting

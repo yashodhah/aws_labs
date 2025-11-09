@@ -1,0 +1,1 @@
+fargate compute type: https://docs.aws.amazon.com/eks/latest/userguide/fargate.html?utm_source=chatgpt.com
